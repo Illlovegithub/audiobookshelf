@@ -24,7 +24,7 @@ COPY --from=tone /usr/local/bin/tone /usr/local/bin/
 COPY --from=build /client/dist /client/dist
 COPY index.js package* /
 COPY server server
-
+RUN npm install --package-lock-only
 RUN npm ci --only=production
 
 RUN apk del make python3 g++
