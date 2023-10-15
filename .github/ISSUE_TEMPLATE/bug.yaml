@@ -1,0 +1,50 @@
+name: 🐞 Bug Report
+description: File a bug/issue
+title: "[Bug]: "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: "### Please first search for your issue and check the [docs](https://audiobookshelf.org/docs)."
+  - type: markdown
+    attributes:
+      value: "### Mobile app issues report [here](https://github.com/advplyr/audiobookshelf-app/issues/new/choose)."
+  - type: markdown
+    attributes:
+      value: "### Join the [discord server](https://discord.gg/pJsjuNCKRq) for questions or if you are not sure about a bug."
+  - type: markdown
+    attributes:
+      value: "## Be as descriptive as you can. Include screenshots, error logs, browser, file types, everything you can think of that might be relevant."
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: Describe the issue
+      description: What happened & what did you expect to happen
+    validations:
+      required: true
+  - type: textarea
+    id: steps-to-reproduce
+    attributes:
+      label: Steps to reproduce the issue
+      value: "1. "
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Audiobookshelf version
+      description: Do not put 'Latest version', please put the actual version here
+      placeholder: "e.g. v1.6.60"
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: How are you running audiobookshelf?
+      options:
+        - Docker
+        - Debian/PPA
+        - Built from source
+        - Other
+    validations:
+     required: true

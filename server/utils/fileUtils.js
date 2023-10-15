@@ -1,0 +1,331 @@
+const axios = require('axios')
+const Path = require('path')
+const ssrfFilter = require('ssrf-req-filter')
+const fs = require('../libs/fsExtra')
+const rra = require('../libs/recursiveReaddirAsync')
+const Logger = require('../Logger')
+const { AudioMimeType } = require('./constants')
+
+
+/**
+* Make sure folder separator is POSIX for Windows file paths. e.g. "C:\Users\Abs" becomes "C:/Users/Abs"
+*
+* @param {String} path - Ugly file path
+* @return {String} Pretty posix file path
+*/
+const filePathToPOSIX = (path) => {
+  if (!global.isWin || !path) return path
+  return path.replace(/\\/g, '/')
+}
+module.exports.filePathToPOSIX = filePathToPOSIX
+
+async function getFileStat(path) {
+  try {
+    var stat = await fs.stat(path)
+    return {
+      size: stat.size,
+      atime: stat.atime,
+      mtime: stat.mtime,
+      ctime: stat.ctime,
+      birthtime: stat.birthtime
+    }
+  } catch (err) {
+    Logger.error('[fileUtils] Failed to stat', err)
+    return false
+  }
+}
+module.exports.getFileStat = getFileStat
+
+async function getFileTimestampsWithIno(path) {
+  try {
+    var stat = await fs.stat(path, { bigint: true })
+    return {
+      size: Number(stat.size),
+      mtimeMs: Number(stat.mtimeMs),
+      ctimeMs: Number(stat.ctimeMs),
+      birthtimeMs: Number(stat.birthtimeMs),
+      ino: String(stat.ino)
+    }
+  } catch (err) {
+    Logger.error('[fileUtils] Failed to getFileTimestampsWithIno', err)
+    return false
+  }
+}
+module.exports.getFileTimestampsWithIno = getFileTimestampsWithIno
+
+async function getFileSize(path) {
+  var stat = await getFileStat(path)
+  if (!stat) return 0
+  return stat.size || 0
+}
+module.exports.getFileSize = getFileSize
+
+/**
+ * 
+ * @param {string} filepath 
+ * @returns {boolean}
+ */
+async function checkPathIsFile(filepath) {
+  try {
+    const stat = await fs.stat(filepath)
+    return stat.isFile()
+  } catch (err) {
+    return false
+  }
+}
+module.exports.checkPathIsFile = checkPathIsFile
+
+function getIno(path) {
+  return fs.stat(path, { bigint: true }).then((data => String(data.ino))).catch((err) => {
+    Logger.error('[Utils] Failed to get ino for path', path, err)
+    return null
+  })
+}
+module.exports.getIno = getIno
+
+/**
+ * Read contents of file
+ * @param {string} path 
+ * @returns {string}
+ */
+async function readTextFile(path) {
+  try {
+    var data = await fs.readFile(path)
+    return String(data)
+  } catch (error) {
+    Logger.error(`[FileUtils] ReadTextFile error ${error}`)
+    return ''
+  }
+}
+module.exports.readTextFile = readTextFile
+
+function bytesPretty(bytes, decimals = 0) {
+  if (bytes === 0) {
+    return '0 Bytes'
+  }
+  const k = 1000
+  var dm = decimals < 0 ? 0 : decimals
+  const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB']
+  const i = Math.floor(Math.log(bytes) / Math.log(k))
+  if (i > 2 && dm === 0) dm = 1
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i]
+}
+module.exports.bytesPretty = bytesPretty
+
+/**
+ * Get array of files inside dir
+ * @param {string} path 
+ * @param {string} [relPathToReplace] 
+ * @returns {{name:string, path:string, dirpath:string, reldirpath:string, fullpath:string, extension:string, deep:number}[]}
+ */
+async function recurseFiles(path, relPathToReplace = null) {
+  path = filePathToPOSIX(path)
+  if (!path.endsWith('/')) path = path + '/'
+
+  if (relPathToReplace) {
+    relPathToReplace = filePathToPOSIX(relPathToReplace)
+    if (!relPathToReplace.endsWith('/')) relPathToReplace += '/'
+  } else {
+    relPathToReplace = path
+  }
+
+  const options = {
+    mode: rra.LIST,
+    recursive: true,
+    stats: false,
+    ignoreFolders: true,
+    extensions: true,
+    deep: true,
+    realPath: true,
+    normalizePath: true
+  }
+  let list = await rra.list(path, options)
+  if (list.error) {
+    Logger.error('[fileUtils] Recurse files error', list.error)
+    return []
+  }
+
+  const directoriesToIgnore = []
+
+  list = list.filter((item) => {
+    if (item.error) {
+      Logger.error(`[fileUtils] Recurse files file "${item.fullname}" has error`, item.error)
+      return false
+    }
+
+    const relpath = item.fullname.replace(relPathToReplace, '')
+    let reldirname = Path.dirname(relpath)
+    if (reldirname === '.') reldirname = ''
+    const dirname = Path.dirname(item.fullname)
+
+    // Directory has a file named ".ignore" flag directory and ignore
+    if (item.name === '.ignore' && reldirname && reldirname !== '.' && !directoriesToIgnore.includes(dirname)) {
+      Logger.debug(`[fileUtils] .ignore found - ignoring directory "${reldirname}"`)
+      directoriesToIgnore.push(dirname)
+      return false
+    }
+
+    if (item.extension === '.part') {
+      Logger.debug(`[fileUtils] Ignoring .part file "${relpath}"`)
+      return false
+    }
+
+    // Ignore any file if a directory or the filename starts with "."
+    if (relpath.split('/').find(p => p.startsWith('.'))) {
+      Logger.debug(`[fileUtils] Ignoring path has . "${relpath}"`)
+      return false
+    }
+
+    return true
+  }).filter(item => {
+    // Filter out items in ignore directories
+    if (directoriesToIgnore.some(dir => item.fullname.startsWith(dir))) {
+      Logger.debug(`[fileUtils] Ignoring path in dir with .ignore "${item.fullname}"`)
+      return false
+    }
+    return true
+  }).map((item) => {
+    var isInRoot = (item.path + '/' === relPathToReplace)
+    return {
+      name: item.name,
+      path: item.fullname.replace(relPathToReplace, ''),
+      dirpath: item.path,
+      reldirpath: isInRoot ? '' : item.path.replace(relPathToReplace, ''),
+      fullpath: item.fullname,
+      extension: item.extension,
+      deep: item.deep
+    }
+  })
+
+  // Sort from least deep to most
+  list.sort((a, b) => a.deep - b.deep)
+
+  return list
+}
+module.exports.recurseFiles = recurseFiles
+
+/**
+ * Download file from web to local file system
+ * Uses SSRF filter to prevent internal URLs
+ * 
+ * @param {string} url 
+ * @param {string} filepath path to download the file to
+ * @param {Function} [contentTypeFilter] validate content type before writing
+ * @returns {Promise}
+ */
+module.exports.downloadFile = (url, filepath, contentTypeFilter = null) => {
+  return new Promise(async (resolve, reject) => {
+    Logger.debug(`[fileUtils] Downloading file to ${filepath}`)
+    axios({
+      url,
+      method: 'GET',
+      responseType: 'stream',
+      timeout: 30000,
+      httpAgent: ssrfFilter(url),
+      httpsAgent: ssrfFilter(url)
+    }).then((response) => {
+      // Validate content type
+      if (contentTypeFilter && !contentTypeFilter?.(response.headers?.['content-type'])) {
+        return reject(new Error(`Invalid content type "${response.headers?.['content-type'] || ''}"`))
+      }
+
+      // Write to filepath
+      const writer = fs.createWriteStream(filepath)
+      response.data.pipe(writer)
+
+      writer.on('finish', resolve)
+      writer.on('error', reject)
+    }).catch((err) => {
+      Logger.error(`[fileUtils] Failed to download file "${filepath}"`, err)
+      reject(err)
+    })
+  })
+}
+
+/**
+ * Download image file from web to local file system
+ * Response header must have content-type of image/ (excluding svg)
+ * 
+ * @param {string} url 
+ * @param {string} filepath 
+ * @returns {Promise}
+ */
+module.exports.downloadImageFile = (url, filepath) => {
+  const contentTypeFilter = (contentType) => {
+    return contentType?.startsWith('image/') && contentType !== 'image/svg+xml'
+  }
+  return this.downloadFile(url, filepath, contentTypeFilter)
+}
+
+module.exports.sanitizeFilename = (filename, colonReplacement = ' - ') => {
+  if (typeof filename !== 'string') {
+    return false
+  }
+
+  // Most file systems use number of bytes for max filename
+  //   to support most filesystems we will use max of 255 bytes in utf-16
+  //   Ref: https://doc.owncloud.com/server/next/admin_manual/troubleshooting/path_filename_length.html
+  //   Issue: https://github.com/advplyr/audiobookshelf/issues/1261
+  const MAX_FILENAME_BYTES = 255
+
+  const replacement = ''
+  const illegalRe = /[\/\?<>\\:\*\|"]/g
+  const controlRe = /[\x00-\x1f\x80-\x9f]/g
+  const reservedRe = /^\.+$/
+  const windowsReservedRe = /^(con|prn|aux|nul|com[0-9]|lpt[0-9])(\..*)?$/i
+  const windowsTrailingRe = /[\. ]+$/
+  const lineBreaks = /[\n\r]/g
+
+  let sanitized = filename
+    .replace(':', colonReplacement) // Replace first occurrence of a colon
+    .replace(illegalRe, replacement)
+    .replace(controlRe, replacement)
+    .replace(reservedRe, replacement)
+    .replace(lineBreaks, replacement)
+    .replace(windowsReservedRe, replacement)
+    .replace(windowsTrailingRe, replacement)
+
+  // Check if basename is too many bytes
+  const ext = Path.extname(sanitized) // separate out file extension
+  const basename = Path.basename(sanitized, ext)
+  const extByteLength = Buffer.byteLength(ext, 'utf16le')
+  const basenameByteLength = Buffer.byteLength(basename, 'utf16le')
+  if (basenameByteLength + extByteLength > MAX_FILENAME_BYTES) {
+    const MaxBytesForBasename = MAX_FILENAME_BYTES - extByteLength
+    let totalBytes = 0
+    let trimmedBasename = ''
+
+    // Add chars until max bytes is reached
+    for (const char of basename) {
+      totalBytes += Buffer.byteLength(char, 'utf16le')
+      if (totalBytes > MaxBytesForBasename) break
+      else trimmedBasename += char
+    }
+
+    trimmedBasename = trimmedBasename.trim()
+    sanitized = trimmedBasename + ext
+  }
+
+  return sanitized
+}
+
+// Returns null if extname is not in our defined list of audio extnames
+module.exports.getAudioMimeTypeFromExtname = (extname) => {
+  if (!extname || !extname.length) return null
+  const formatUpper = extname.slice(1).toUpperCase()
+  if (AudioMimeType[formatUpper]) return AudioMimeType[formatUpper]
+  return null
+}
+
+module.exports.removeFile = (path) => {
+  if (!path) return false
+  return fs.remove(path).then(() => true).catch((error) => {
+    Logger.error(`[fileUtils] Failed remove file "${path}"`, error)
+    return false
+  })
+}
+
+module.exports.encodeUriPath = (path) => {
+  const uri = new URL(path, "file://")
+  return uri.pathname
+}
